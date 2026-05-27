@@ -30,6 +30,7 @@ class val:
 def generate_salt(length: int = 32) -> str:
     raw_bytes = os.urandom(length)
     return raw_bytes.hex()
+
 # Tạo salt ngẫu nhiên có độ dài là 32 bytes
 # trả về chuỗi hex 64 ký tự
 
@@ -48,6 +49,7 @@ def hash_password(password: str, salt: str) -> Hash256Salt:
         store_value = f"{salt}${digiest}",
         algorithm = "SHA-256",
     )
+
 # Hàm băm mật khẩu với salt
 # Trả lại kết quả hàm băm dưới dạng Hash256Salt
 
@@ -61,7 +63,7 @@ def verify_password(password: str, hash_salt: Hash256Salt) -> bool:
 def val_password(password: str) -> val:
     errors = []
     score = 0
-    strength = "Yếu"
+    
 
     if len(password) < 8:
         errors.append("Mat khau co it nhat 8 ky tu")

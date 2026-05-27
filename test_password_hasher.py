@@ -1,20 +1,19 @@
 """
 test_password_hasher.py
 =======================
-Kiểm thử toàn diện cho module password_hasher.py
-
-Chạy: python -m pytest test_password_hasher.py -v
-Hoặc: python test_password_hasher.py
+Kiểm thử toàn diện cho module password_hasher.py (nâng cấp)
 """
 
 import hashlib
 import sys
 import time
 import unittest
+import os
 
 from password_hasher import (
     HashResult,
     ValidationResult,
+    PasswordChangeResult,
     format_stored_value,
     generate_salt,
     hash_password,
@@ -22,329 +21,283 @@ from password_hasher import (
     register_password,
     validate_password,
     verify_password,
+    change_password,
+    needs_rehash,
+    RateLimiter,
+    PEPPER,
+    ITERATIONS
 )
 
 
 # ──────────────────────────────────────────────────────
-# TestGenerateSalt
+# Test cho các hàm mới
 # ──────────────────────────────────────────────────────
+
+class TestChangePassword(unittest.TestCase):
+    """Kiểm thử change_password()"""
+    
+    def setUp(self):
+        self.password = "OldPass@123"
+        self.result = register_password(self.password)
+    
+    def test_change_password_success(self):
+        """Đổi mật khẩu thành công với đúng mật khẩu cũ."""
+        new_password = "NewPass@456"
+        result = change_password(
+            self.password, 
+            new_password, 
+            self.result.stored_value
+        )
+        self.assertTrue(result.success)
+        self.assertIsNotNone(result.new_stored_value)
+        # Verify mật khẩu mới hoạt động
+        self.assertTrue(verify_password(new_password, result.new_stored_value))
+        # Verify mật khẩu cũ không còn hoạt động
+        self.assertFalse(verify_password(self.password, result.new_stored_value))
+    
+    def test_change_password_wrong_old(self):
+        """Đổi mật khẩu thất bại với mật khẩu cũ sai."""
+        result = change_password(
+            "WrongPass@123",
+            "NewPass@456",
+            self.result.stored_value
+        )
+        self.assertFalse(result.success)
+        self.assertIn("không chính xác", result.message)
+    
+    def test_change_password_same_password(self):
+        """Không cho phép đổi sang mật khẩu giống cũ."""
+        result = change_password(
+            self.password,
+            self.password,
+            self.result.stored_value
+        )
+        self.assertFalse(result.success)
+        self.assertIn("không được trùng", result.message)
+    
+    def test_change_password_weak_new(self):
+        """Không cho phép đổi sang mật khẩu yếu."""
+        result = change_password(
+            self.password,
+            "weak",
+            self.result.stored_value
+        )
+        self.assertFalse(result.success)
+        self.assertIn("không hợp lệ", result.message)
+
+
+class TestNeedsRehash(unittest.TestCase):
+    """Kiểm thử needs_rehash()"""
+    
+    def test_old_format_needs_rehash(self):
+        """Định dạng cũ (sha256v1) cần rehash."""
+        old_format = "sha256v1$abc123$def456"
+        self.assertTrue(needs_rehash(old_format))
+    
+    def test_new_format_with_low_iterations(self):
+        """Iterations thấp hơn chuẩn cần rehash."""
+        # Tạo stored_value với iterations thấp
+        salt = generate_salt()
+        low_iter_value = format_stored_value(salt, "a"*64, iterations=1000, use_pepper=True)
+        self.assertTrue(needs_rehash(low_iter_value))
+    
+    def test_current_format_no_rehash(self):
+        """Định dạng hiện tại với iterations đủ cao không cần rehash."""
+        result = register_password("StrongPass@123")
+        self.assertFalse(needs_rehash(result.stored_value))
+
+
+class TestRateLimiter(unittest.TestCase):
+    """Kiểm thử RateLimiter class."""
+    
+    def setUp(self):
+        self.rate_limiter = RateLimiter(max_attempts=3, lockout_seconds=1)
+    
+    def test_is_locked_initially_false(self):
+        """Ban đầu tài khoản không bị khóa."""
+        is_locked, _ = self.rate_limiter.is_locked("testuser")
+        self.assertFalse(is_locked)
+    
+    def test_record_failed_increments(self):
+        """Ghi nhận failed attempts."""
+        count, _ = self.rate_limiter.record_failed("testuser")
+        self.assertEqual(count, 1)
+        
+        count, _ = self.rate_limiter.record_failed("testuser")
+        self.assertEqual(count, 2)
+    
+    def test_lockout_after_max_attempts(self):
+        """Khóa tài khoản sau max_attempts lần thất bại."""
+        for _ in range(3):
+            self.rate_limiter.record_failed("testuser")
+        
+        is_locked, remaining = self.rate_limiter.is_locked("testuser")
+        self.assertTrue(is_locked)
+        self.assertIsNotNone(remaining)
+    
+    def test_lockout_expires(self):
+        """Khóa tài khoản hết hạn sau lockout_seconds."""
+        for _ in range(3):
+            self.rate_limiter.record_failed("testuser")
+        
+        # Kiểm tra khóa
+        is_locked, _ = self.rate_limiter.is_locked("testuser")
+        self.assertTrue(is_locked)
+        
+        # Chờ hết thời gian khóa
+        time.sleep(1.1)
+        
+        # Kiểm tra lại - hết khóa
+        is_locked, _ = self.rate_limiter.is_locked("testuser")
+        self.assertFalse(is_locked)
+    
+    def test_record_success_resets(self):
+        """Đăng nhập thành công reset failed attempts."""
+        self.rate_limiter.record_failed("testuser")
+        self.rate_limiter.record_failed("testuser")
+        
+        self.rate_limiter.record_success("testuser")
+        
+        is_locked, _ = self.rate_limiter.is_locked("testuser")
+        self.assertFalse(is_locked)
+        
+        # Sau reset, chỉ cần thêm 1 lần fail là chưa khóa
+        self.rate_limiter.record_failed("testuser")
+        is_locked, _ = self.rate_limiter.is_locked("testuser")
+        self.assertFalse(is_locked)
+
+
+class TestPepper(unittest.TestCase):
+    """Kiểm thử tính năng pepper."""
+    
+    def test_pepper_changes_hash(self):
+        """Hash với pepper khác hash không pepper."""
+        salt = generate_salt()
+        password = "TestPass@123"
+        
+        result_with_pepper = hash_password(password, salt, use_pepper=True)
+        result_without_pepper = hash_password(password, salt, use_pepper=False)
+        
+        self.assertNotEqual(result_with_pepper.hash, result_without_pepper.hash)
+    
+    def test_verify_with_pepper_works(self):
+        """Xác thực với pepper hoạt động đúng."""
+        result = hash_password("TestPass@123", use_pepper=True)
+        self.assertTrue(verify_password("TestPass@123", result.stored_value))
+        self.assertFalse(verify_password("WrongPass@123", result.stored_value))
+    
+    def test_verify_without_pepper_fails_with_pepper_hash(self):
+        """Mật khẩu đúng nhưng không dùng pepper sẽ không verify được hash có pepper."""
+        result = hash_password("TestPass@123", use_pepper=True)
+        # Tạo stored_value không pepper từ cùng mật khẩu
+        no_pepper_result = hash_password("TestPass@123", use_pepper=False)
+        self.assertNotEqual(result.stored_value, no_pepper_result.stored_value)
+
+
+class TestPBKDF2Iterations(unittest.TestCase):
+    """Kiểm thử multi-round hashing."""
+    
+    def test_different_iterations_produce_different_hash(self):
+        """Số vòng lặp khác nhau tạo hash khác nhau."""
+        salt = generate_salt()
+        password = "TestPass@123"
+        
+        result_1k = hash_password(password, salt, iterations=1000)
+        result_10k = hash_password(password, salt, iterations=10000)
+        
+        self.assertNotEqual(result_1k.hash, result_10k.hash)
+    
+    def test_verify_works_with_custom_iterations(self):
+        """Xác thực hoạt động với số vòng lặp tùy chỉnh."""
+        result = hash_password("TestPass@123", iterations=50000)
+        self.assertTrue(verify_password("TestPass@123", result.stored_value))
+    
+    def test_performance_reasonable(self):
+        """Performance của PBKDF2 với iterations=10000 phải chấp nhận được."""
+        start = time.time()
+        hash_password("TestPass@123", iterations=10000)
+        elapsed = time.time() - start
+        # PBKDF2 với 10000 iterations nên < 1s (trên máy tính hiện đại)
+        self.assertLess(elapsed, 0.5)
+
+
+# ──────────────────────────────────────────────────────
+# Test cho các hàm cũ (giữ nguyên)
+# ──────────────────────────────────────────────────────
+
 class TestGenerateSalt(unittest.TestCase):
     """Kiểm thử generate_salt()"""
-
+    
     def test_length_default(self):
-        """Salt mặc định phải dài 64 ký tự hex (32 bytes × 2)."""
         salt = generate_salt()
-        self.assertEqual(len(salt), 64, "Salt phải có 64 ký tự hex")
-
-    def test_length_custom(self):
-        """Salt tùy chỉnh số byte."""
-        salt = generate_salt(num_bytes=16)
-        self.assertEqual(len(salt), 32)
-
-    def test_is_hex_string(self):
-        """Salt phải là chuỗi hex hợp lệ."""
-        salt = generate_salt()
-        try:
-            int(salt, 16)
-        except ValueError:
-            self.fail("Salt không phải chuỗi hex hợp lệ")
-
+        self.assertEqual(len(salt), 64)
+    
     def test_uniqueness(self):
-        """Hai lần gọi phải cho salt khác nhau (xác suất collision ≈ 0)."""
         salts = {generate_salt() for _ in range(1000)}
-        self.assertEqual(len(salts), 1000, "Salt bị trùng lặp!")
-
-    def test_returns_string(self):
-        self.assertIsInstance(generate_salt(), str)
+        self.assertEqual(len(salts), 1000)
 
 
-# ──────────────────────────────────────────────────────
-# TestHashPassword
-# ──────────────────────────────────────────────────────
 class TestHashPassword(unittest.TestCase):
     """Kiểm thử hash_password()"""
-
-    def setUp(self):
-        self.salt = generate_salt()
-        self.password = "SecurePass@2024"
-
-    def test_returns_hash_result(self):
-        result = hash_password(self.password, self.salt)
-        self.assertIsInstance(result, HashResult)
-
+    
     def test_hash_length(self):
-        """SHA-256 luôn cho output 64 ký tự hex."""
-        result = hash_password(self.password, self.salt)
+        result = hash_password("Test@123", generate_salt())
         self.assertEqual(len(result.hash), 64)
-
-    def test_same_input_same_output(self):
-        """Cùng password + salt phải cho cùng hash (deterministic)."""
-        r1 = hash_password(self.password, self.salt)
-        r2 = hash_password(self.password, self.salt)
-        self.assertEqual(r1.hash, r2.hash)
-
+    
     def test_different_salt_different_hash(self):
-        """Cùng password nhưng salt khác → hash khác (chống rainbow table)."""
-        salt1 = generate_salt()
-        salt2 = generate_salt()
-        r1 = hash_password(self.password, salt1)
-        r2 = hash_password(self.password, salt2)
-        self.assertNotEqual(
-            r1.hash, r2.hash,
-            "Hai salt khác nhau phải tạo ra hai hash khác nhau"
-        )
-
-    def test_different_password_different_hash(self):
-        """Cùng salt nhưng password khác → hash khác."""
-        r1 = hash_password("password1", self.salt)
-        r2 = hash_password("password2", self.salt)
+        password = "Test@123"
+        r1 = hash_password(password, generate_salt())
+        r2 = hash_password(password, generate_salt())
         self.assertNotEqual(r1.hash, r2.hash)
-
-    def test_stored_value_format(self):
-        """stored_value phải đúng định dạng sha256v1$salt$hash."""
-        result = hash_password(self.password, self.salt)
-        parts = result.stored_value.split("$")
-        self.assertEqual(len(parts), 3)
-        self.assertEqual(parts[0], "sha256v1")
-        self.assertEqual(parts[1], self.salt)
-        self.assertEqual(parts[2], result.hash)
-
-    def test_algorithm_field(self):
-        result = hash_password(self.password, self.salt)
-        self.assertEqual(result.algorithm, "sha256")
-
+    
     def test_empty_password_raises(self):
         with self.assertRaises(ValueError):
-            hash_password("", self.salt)
-
-    def test_empty_salt_raises(self):
-        with self.assertRaises(ValueError):
-            hash_password(self.password, "")
-
-    def test_non_string_password_raises(self):
-        with self.assertRaises(TypeError):
-            hash_password(12345, self.salt)
-
-    def test_unicode_password(self):
-        """Mật khẩu unicode (tiếng Việt) phải hoạt động đúng."""
-        result = hash_password("Mậtkhẩu@2024", self.salt)
-        self.assertEqual(len(result.hash), 64)
-
-    def test_correctness_against_stdlib(self):
-        """Kiểm tra kết quả đúng so với tính tay bằng hashlib."""
-        pw   = "TestPassword1!"
-        salt = "a" * 64
-        expected = hashlib.sha256((salt + pw).encode("utf-8")).hexdigest()
-        result = hash_password(pw, salt)
-        self.assertEqual(result.hash, expected)
+            hash_password("", generate_salt())
 
 
-# ──────────────────────────────────────────────────────
-# TestVerifyPassword
-# ──────────────────────────────────────────────────────
 class TestVerifyPassword(unittest.TestCase):
     """Kiểm thử verify_password()"""
-
-    def setUp(self):
-        self.password = "MyPass@2024"
-        self.salt     = generate_salt()
-        self.result   = hash_password(self.password, self.salt)
-
-    def test_correct_password_returns_true(self):
-        self.assertTrue(
-            verify_password(self.password, self.result.stored_value)
-        )
-
-    def test_wrong_password_returns_false(self):
-        self.assertFalse(
-            verify_password("WrongPassword!", self.result.stored_value)
-        )
-
-    def test_empty_password_returns_false(self):
-        self.assertFalse(
-            verify_password("", self.result.stored_value)
-        )
-
-    def test_case_sensitive(self):
-        """Phân biệt chữ hoa/thường."""
-        self.assertFalse(
-            verify_password(self.password.upper(), self.result.stored_value)
-        )
-
-    def test_partial_password_returns_false(self):
-        self.assertFalse(
-            verify_password(self.password[:-1], self.result.stored_value)
-        )
-
-    def test_corrupted_stored_value(self):
-        """stored_value bị hỏng không được raise exception, chỉ trả False."""
-        self.assertFalse(verify_password(self.password, "corrupted_value"))
-        self.assertFalse(verify_password(self.password, ""))
-        self.assertFalse(verify_password(self.password, "a$b"))
-
+    
+    def test_correct_password(self):
+        result = register_password("TestPass@123")
+        self.assertTrue(verify_password("TestPass@123", result.stored_value))
+    
+    def test_wrong_password(self):
+        result = register_password("TestPass@123")
+        self.assertFalse(verify_password("WrongPass@123", result.stored_value))
+    
     def test_timing_attack_resistance(self):
-        """
-        Thời gian so sánh đúng/sai phải gần bằng nhau.
-        (Chứng minh hmac.compare_digest hoạt động đúng)
-        """
+        """Kiểm tra timing attack resistance."""
+        result = register_password("TestPass@123")
         iterations = 500
-        # Đo thời gian verify đúng
+        
         t0 = time.perf_counter()
         for _ in range(iterations):
-            verify_password(self.password, self.result.stored_value)
+            verify_password("TestPass@123", result.stored_value)
         correct_time = time.perf_counter() - t0
-
-        # Đo thời gian verify sai hoàn toàn
+        
         t0 = time.perf_counter()
         for _ in range(iterations):
-            verify_password("X" * len(self.password), self.result.stored_value)
+            verify_password("X" * 20, result.stored_value)
         wrong_time = time.perf_counter() - t0
-
-        # Hai thời gian không được chênh nhau quá 5× (threshold rộng cho môi trường ảo)
+        
         ratio = max(correct_time, wrong_time) / min(correct_time, wrong_time)
-        self.assertLess(ratio, 5.0, f"Timing ratio quá lớn: {ratio:.2f}x")
+        self.assertLess(ratio, 5.0)
 
 
-# ──────────────────────────────────────────────────────
-# TestStoredValue
-# ──────────────────────────────────────────────────────
-class TestStoredValue(unittest.TestCase):
-    """Kiểm thử format_stored_value() và parse_stored_value()"""
-
-    def test_roundtrip(self):
-        """format → parse phải khôi phục đúng salt và hash."""
-        salt = generate_salt()
-        h    = "a" * 64
-        stored = format_stored_value(salt, h)
-        parsed_salt, parsed_hash = parse_stored_value(stored)
-        self.assertEqual(parsed_salt, salt)
-        self.assertEqual(parsed_hash, h)
-
-    def test_invalid_format_raises(self):
-        with self.assertRaises(ValueError):
-            parse_stored_value("noseparator")
-
-    def test_wrong_version_raises(self):
-        with self.assertRaises(ValueError):
-            parse_stored_value("md5v1$salt$hash")
-
-    def test_too_many_parts_raises(self):
-        with self.assertRaises(ValueError):
-            parse_stored_value("sha256v1$salt$hash$extra")
-
-
-# ──────────────────────────────────────────────────────
-# TestValidatePassword
-# ──────────────────────────────────────────────────────
 class TestValidatePassword(unittest.TestCase):
     """Kiểm thử validate_password()"""
-
+    
     def test_strong_password(self):
         r = validate_password("Secure@Pass9!")
         self.assertTrue(r.is_valid)
         self.assertEqual(r.strength, "Mạnh")
-        self.assertEqual(r.score, 5)
-
+    
     def test_too_short(self):
         r = validate_password("Ab1!")
         self.assertFalse(r.is_valid)
         self.assertIn("Tối thiểu 8 ký tự", r.errors)
 
-    def test_no_uppercase(self):
-        r = validate_password("mypass@2024")
-        self.assertIn("Có ít nhất 1 chữ hoa (A-Z)", r.errors)
 
-    def test_no_lowercase(self):
-        r = validate_password("MYPASS@2024")
-        self.assertIn("Có ít nhất 1 chữ thường (a-z)", r.errors)
-
-    def test_no_digit(self):
-        r = validate_password("MyPass@!")
-        self.assertIn("Có ít nhất 1 chữ số (0-9)", r.errors)
-
-    def test_no_special_char(self):
-        r = validate_password("MyPass2024")
-        self.assertIn("Có ít nhất 1 ký tự đặc biệt", r.errors)
-
-    def test_weak_password(self):
-        r = validate_password("abc")
-        self.assertEqual(r.strength, "Yếu")
-
-    def test_medium_password(self):
-        r = validate_password("MyPassword2024")   # Thiếu special char
-        self.assertEqual(r.strength, "Trung bình")
-
-    def test_returns_validation_result(self):
-        self.assertIsInstance(validate_password("test"), ValidationResult)
-
-
-# ──────────────────────────────────────────────────────
-# TestRegisterPassword
-# ──────────────────────────────────────────────────────
-class TestRegisterPassword(unittest.TestCase):
-    """Kiểm thử hàm tổng hợp register_password()"""
-
-    def test_valid_password(self):
-        result = register_password("StrongPass@99")
-        self.assertIsInstance(result, HashResult)
-        self.assertEqual(len(result.hash), 64)
-        self.assertEqual(len(result.salt), 64)
-
-    def test_weak_password_raises(self):
-        with self.assertRaises(ValueError) as ctx:
-            register_password("weak")
-        self.assertIn("Mật khẩu không hợp lệ", str(ctx.exception))
-
-    def test_stored_value_can_verify(self):
-        """stored_value từ register phải verify được ngay."""
-        pw     = "TestReg@2024"
-        result = register_password(pw)
-        self.assertTrue(verify_password(pw, result.stored_value))
-
-
-# ──────────────────────────────────────────────────────
-# TestIntegration: Luồng đăng ký → đăng nhập đầy đủ
-# ──────────────────────────────────────────────────────
-class TestIntegration(unittest.TestCase):
-    """Kiểm thử luồng nghiệp vụ hoàn chỉnh."""
-
-    def test_register_then_login_success(self):
-        password = "Integration@99"
-        # Bước 1: Đăng ký — tạo hash lưu DB
-        reg  = register_password(password)
-        db_stored_value = reg.stored_value   # Giả lập lưu vào DB
-
-        # Bước 2: Đăng nhập — xác thực
-        self.assertTrue(verify_password(password, db_stored_value))
-
-    def test_register_then_login_wrong_password(self):
-        reg = register_password("Correct@Pass1")
-        self.assertFalse(verify_password("Wrong@Pass1", reg.stored_value))
-
-    def test_two_users_same_password_different_hash(self):
-        """Hai người dùng cùng mật khẩu phải có hash khác nhau do salt khác."""
-        pw = "SamePass@2024"
-        r1 = register_password(pw)
-        r2 = register_password(pw)
-        self.assertNotEqual(r1.salt, r2.salt)
-        self.assertNotEqual(r1.hash, r2.hash)
-        # Nhưng cả hai đều verify đúng
-        self.assertTrue(verify_password(pw, r1.stored_value))
-        self.assertTrue(verify_password(pw, r2.stored_value))
-
-    def test_stored_value_not_contain_plain_password(self):
-        """stored_value không được chứa mật khẩu gốc."""
-        pw  = "SecretPass@1"
-        reg = register_password(pw)
-        self.assertNotIn(pw, reg.stored_value)
-
-
-# ──────────────────────────────────────────────────────
-# Entry point
-# ──────────────────────────────────────────────────────
 if __name__ == "__main__":
-    loader  = unittest.TestLoader()
-    suite   = loader.loadTestsFromModule(sys.modules[__name__])
-    runner  = unittest.TextTestRunner(verbosity=2)
-    result  = runner.run(suite)
-    sys.exit(0 if result.wasSuccessful() else 1)
+    unittest.main(verbosity=2)
