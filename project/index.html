@@ -1,0 +1,830 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Auth System — Demo</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg:        #f4f4f1;
+      --surface:   #ffffff;
+      --border:    #e2e1dc;
+      --text:      #1a1a18;
+      --muted:     #6b6b65;
+      --hint:      #9b9b93;
+      --blue:      #2563eb;
+      --blue-dark: #1d4ed8;
+      --blue-bg:   #eff6ff;
+      --green:     #16a34a;
+      --green-dark:#15803d;
+      --green-bg:  #f0fdf4;
+      --red:       #dc2626;
+      --red-bg:    #fef2f2;
+      --amber:     #d97706;
+      --amber-bg:  #fffbeb;
+      --radius-sm: 6px;
+      --radius:    10px;
+      --radius-lg: 14px;
+      --shadow:    0 1px 3px rgba(0,0,0,.08), 0 1px 2px rgba(0,0,0,.05);
+      --shadow-md: 0 4px 16px rgba(0,0,0,.1);
+      --mono:      'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 2rem 1rem 4rem;
+    }
+
+    /* ── Header ── */
+    header {
+      text-align: center;
+      margin-bottom: 2rem;
+    }
+    header h1 {
+      font-size: 1.5rem;
+      font-weight: 600;
+      letter-spacing: -.02em;
+      color: var(--text);
+    }
+    header p { font-size: .85rem; color: var(--muted); margin-top: 4px; }
+    .server-status {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      margin-top: 10px;
+      padding: 4px 12px;
+      border-radius: 100px;
+      font-size: .78rem;
+      font-family: var(--mono);
+      border: 1px solid var(--border);
+      background: var(--surface);
+      color: var(--muted);
+    }
+    .dot {
+      width: 7px; height: 7px;
+      border-radius: 50%;
+      background: var(--hint);
+      transition: background .3s;
+    }
+    .dot.ok  { background: var(--green); }
+    .dot.err { background: var(--red);   }
+
+    /* ── Tab nav ── */
+    .tabs {
+      display: flex;
+      gap: 2px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 3px;
+      margin-bottom: 1.5rem;
+      box-shadow: var(--shadow);
+    }
+    .tab-btn {
+      flex: 1;
+      padding: 8px 20px;
+      font-size: .85rem;
+      font-weight: 500;
+      border: none;
+      border-radius: var(--radius-sm);
+      background: transparent;
+      color: var(--muted);
+      cursor: pointer;
+      transition: all .18s;
+      white-space: nowrap;
+    }
+    .tab-btn.active {
+      background: var(--bg);
+      color: var(--text);
+      box-shadow: var(--shadow);
+    }
+    .tab-btn:hover:not(.active) { color: var(--text); }
+
+    /* ── Panels ── */
+    .panel { display: none; width: 100%; max-width: 440px; }
+    .panel.active { display: block; }
+    #panel-users { max-width: 860px; }
+
+    /* ── Form card ── */
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-lg);
+      padding: 2rem;
+      box-shadow: var(--shadow);
+    }
+    .card-header {
+      text-align: center;
+      margin-bottom: 1.75rem;
+    }
+    .icon-wrap {
+      width: 48px; height: 48px;
+      border-radius: var(--radius);
+      display: flex; align-items: center; justify-content: center;
+      font-size: 1.3rem;
+      margin: 0 auto 12px;
+    }
+    .icon-wrap.blue  { background: var(--blue-bg);  color: var(--blue);  }
+    .icon-wrap.green { background: var(--green-bg); color: var(--green); }
+    .card-header h2 {
+      font-size: 1.15rem; font-weight: 600;
+      letter-spacing: -.01em;
+    }
+    .card-header p { font-size: .83rem; color: var(--muted); margin-top: 3px; }
+
+    /* API badge */
+    .api-tag {
+      display: inline-flex; align-items: center; gap: 6px;
+      padding: 3px 10px;
+      background: #f1f5f9;
+      border: 1px solid #e2e8f0;
+      border-radius: 100px;
+      font-family: var(--mono);
+      font-size: .72rem;
+      color: var(--muted);
+      margin-bottom: 1.25rem;
+    }
+    .method-badge {
+      background: #1e40af; color: #bfdbfe;
+      padding: 1px 7px; border-radius: 4px;
+      font-size: .68rem; font-weight: 600;
+    }
+
+    /* Fields */
+    .field { margin-bottom: 1rem; }
+    .field label {
+      display: block;
+      font-size: .8rem; font-weight: 500;
+      color: var(--muted);
+      margin-bottom: 5px;
+    }
+    .field input {
+      width: 100%;
+      padding: 9px 12px;
+      font-size: .9rem;
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      background: var(--surface);
+      color: var(--text);
+      outline: none;
+      transition: border-color .15s, box-shadow .15s;
+    }
+    .field input:focus {
+      border-color: var(--blue);
+      box-shadow: 0 0 0 3px rgba(37,99,235,.12);
+    }
+    .field.has-error input {
+      border-color: var(--red);
+      box-shadow: 0 0 0 3px rgba(220,38,38,.1);
+    }
+    .field-hint {
+      font-size: .75rem;
+      color: var(--hint);
+      margin-top: 4px;
+    }
+    .field-hint.error { color: var(--red); }
+
+    /* Password input wrapper */
+    .pw-wrap { position: relative; }
+    .pw-wrap input { padding-right: 40px; }
+    .pw-eye {
+      position: absolute; right: 10px; top: 50%;
+      transform: translateY(-50%);
+      background: none; border: none;
+      cursor: pointer; color: var(--hint);
+      font-size: 1rem; padding: 2px;
+      line-height: 1;
+    }
+    .pw-eye:hover { color: var(--text); }
+
+    /* Strength bar */
+    .strength-track {
+      display: flex; gap: 3px;
+      margin-top: 7px;
+    }
+    .strength-track span {
+      flex: 1; height: 3px;
+      border-radius: 2px;
+      background: var(--border);
+      transition: background .2s;
+    }
+    .strength-track span.weak   { background: var(--red); }
+    .strength-track span.medium { background: var(--amber); }
+    .strength-track span.strong { background: var(--green); }
+    .strength-text {
+      font-size: .73rem;
+      margin-top: 4px;
+      font-weight: 500;
+    }
+    .strength-text.weak   { color: var(--red); }
+    .strength-text.medium { color: var(--amber); }
+    .strength-text.strong { color: var(--green); }
+
+    /* Buttons */
+    .btn {
+      width: 100%; padding: 10px;
+      font-size: .88rem; font-weight: 600;
+      border: none; border-radius: var(--radius-sm);
+      cursor: pointer;
+      display: flex; align-items: center; justify-content: center; gap: 7px;
+      transition: background .15s, transform .1s;
+      margin-top: .25rem;
+    }
+    .btn:active { transform: scale(.99); }
+    .btn:disabled {
+      opacity: .6; cursor: not-allowed;
+      transform: none;
+    }
+    .btn.blue  { background: var(--blue);  color: #fff; }
+    .btn.blue:hover:not(:disabled)  { background: var(--blue-dark); }
+    .btn.green { background: var(--green); color: #fff; }
+    .btn.green:hover:not(:disabled) { background: var(--green-dark); }
+
+    /* Spinner */
+    .spinner {
+      width: 14px; height: 14px;
+      border: 2px solid rgba(255,255,255,.4);
+      border-top-color: #fff;
+      border-radius: 50%;
+      animation: spin .6s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* Response box */
+    .resp-box {
+      margin-top: 1rem;
+      padding: 10px 12px;
+      border-radius: var(--radius-sm);
+      font-family: var(--mono);
+      font-size: .76rem;
+      line-height: 1.6;
+      white-space: pre;
+      overflow-x: auto;
+      display: none;
+    }
+    .resp-box.show { display: block; }
+    .resp-box.ok  { background: var(--green-bg); color: #14532d; border: 1px solid #bbf7d0; }
+    .resp-box.err { background: var(--red-bg);   color: #7f1d1d; border: 1px solid #fecaca; }
+
+    /* Info note */
+    .note {
+      display: flex; gap: 8px; align-items: flex-start;
+      background: #f8fafc;
+      border: 1px solid #e2e8f0;
+      border-radius: var(--radius-sm);
+      padding: 9px 11px;
+      margin-top: 1rem;
+      font-size: .77rem;
+      color: var(--muted);
+      line-height: 1.5;
+    }
+    .note .note-icon { flex-shrink: 0; margin-top: 1px; font-size: .9rem; }
+    .note code {
+      font-family: var(--mono);
+      background: #e2e8f0;
+      padding: 1px 5px;
+      border-radius: 3px;
+      font-size: .72rem;
+    }
+
+    .form-footer {
+      text-align: center;
+      font-size: .82rem;
+      color: var(--muted);
+      margin-top: 1rem;
+    }
+    .form-footer a { color: var(--blue); text-decoration: none; font-weight: 500; }
+    .form-footer a:hover { text-decoration: underline; }
+
+    /* ── User table panel ── */
+    .table-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-lg);
+      box-shadow: var(--shadow);
+      overflow: hidden;
+    }
+    .table-header {
+      padding: 1rem 1.25rem;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      gap: 12px;
+    }
+    .table-header h2 {
+      font-size: 1rem; font-weight: 600;
+    }
+    .table-header p {
+      font-size: .78rem; color: var(--muted); margin-top: 2px;
+      font-family: var(--mono);
+    }
+    .search-box {
+      display: flex; align-items: center; gap: 7px;
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      padding: 6px 10px;
+      background: var(--bg);
+    }
+    .search-box input {
+      border: none; background: transparent;
+      outline: none; font-size: .83rem;
+      color: var(--text); width: 170px;
+    }
+    .search-icon { color: var(--hint); font-size: .9rem; }
+    .refresh-btn {
+      padding: 6px 12px;
+      font-size: .8rem; font-weight: 500;
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      background: var(--surface);
+      cursor: pointer;
+      color: var(--text);
+      display: flex; align-items: center; gap: 5px;
+      transition: background .15s;
+    }
+    .refresh-btn:hover { background: var(--bg); }
+
+    .tbl-wrap { overflow-x: auto; }
+    table { width: 100%; border-collapse: collapse; }
+    thead tr { background: #f8f8f6; border-bottom: 1px solid var(--border); }
+    th {
+      padding: 9px 14px;
+      text-align: left;
+      font-size: .75rem; font-weight: 600;
+      color: var(--muted);
+      letter-spacing: .04em;
+      text-transform: uppercase;
+      white-space: nowrap;
+    }
+    td {
+      padding: 10px 14px;
+      font-size: .83rem;
+      border-bottom: 1px solid var(--border);
+      vertical-align: middle;
+      white-space: nowrap;
+    }
+    tr:last-child td { border-bottom: none; }
+    tbody tr:hover td { background: #fafaf8; }
+
+    .avatar-chip {
+      width: 30px; height: 30px;
+      border-radius: 50%;
+      background: var(--blue-bg);
+      color: var(--blue);
+      display: inline-flex; align-items: center; justify-content: center;
+      font-size: .72rem; font-weight: 600;
+      flex-shrink: 0;
+    }
+    .user-cell { display: flex; align-items: center; gap: 9px; }
+    .mono-cell {
+      font-family: var(--mono);
+      font-size: .75rem;
+      color: var(--hint);
+      max-width: 150px;
+      overflow: hidden; text-overflow: ellipsis;
+    }
+    .date-cell { font-size: .78rem; color: var(--muted); }
+
+    .table-footer {
+      padding: 10px 1.25rem;
+      border-top: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      flex-wrap: wrap; gap: 8px;
+    }
+    .table-footer span { font-size: .78rem; color: var(--muted); }
+
+    /* Loading / empty states */
+    .state-row td {
+      text-align: center;
+      padding: 2.5rem 1rem;
+      color: var(--muted);
+      font-size: .85rem;
+    }
+    .loading-dots::after {
+      content: '...';
+      animation: dots 1.2s steps(4, end) infinite;
+    }
+    @keyframes dots {
+      0%   { content: ''; }
+      25%  { content: '.'; }
+      50%  { content: '..'; }
+      75%  { content: '...'; }
+    }
+  </style>
+</head>
+<body>
+
+  <header>
+    <h1>🔐 Auth System Demo</h1>
+    <p>SHA-256 + Salt · SQLite · Flask REST API</p>
+    <div class="server-status">
+      <span class="dot" id="dot"></span>
+      <span id="server-label">Đang kiểm tra server…</span>
+    </div>
+  </header>
+
+  <div class="tabs">
+    <button class="tab-btn active" onclick="switchTab('reg')">✦ Đăng ký</button>
+    <button class="tab-btn"        onclick="switchTab('login')">→ Đăng nhập</button>
+    <button class="tab-btn"        onclick="switchTab('users')">☰ Người dùng</button>
+  </div>
+
+  <!-- ══ ĐĂNG KÝ ══ -->
+  <div class="panel active" id="panel-reg">
+    <div class="card">
+      <div style="text-align:center">
+        <span class="api-tag">
+          <span class="method-badge">POST</span>/api/auth/register
+        </span>
+      </div>
+      <div class="card-header">
+        <div class="icon-wrap blue">👤</div>
+        <h2>Tạo tài khoản mới</h2>
+        <p>Nhập thông tin để đăng ký</p>
+      </div>
+
+      <div class="field" id="rf-user">
+        <label>Tên đăng nhập</label>
+        <input type="text" id="r-username" placeholder="nguyenvana"
+               autocomplete="username" oninput="clearField('rf-user')">
+        <div class="field-hint">Chữ cái, số, dấu _ · 3–30 ký tự</div>
+      </div>
+
+      <div class="field" id="rf-pass">
+        <label>Mật khẩu</label>
+        <div class="pw-wrap">
+          <input type="password" id="r-password" placeholder="Tối thiểu 8 ký tự"
+                 autocomplete="new-password" oninput="updateStrength()">
+          <button class="pw-eye" onclick="toggleEye('r-password', this)"
+                  aria-label="Hiện/ẩn mật khẩu">👁</button>
+        </div>
+        <div class="strength-track" id="str-track">
+          <span></span><span></span><span></span><span></span><span></span>
+        </div>
+        <div class="strength-text" id="str-label"></div>
+      </div>
+
+      <div class="field" id="rf-confirm">
+        <label>Xác nhận mật khẩu</label>
+        <div class="pw-wrap">
+          <input type="password" id="r-confirm" placeholder="Nhập lại mật khẩu"
+                 autocomplete="new-password" oninput="clearField('rf-confirm')">
+          <button class="pw-eye" onclick="toggleEye('r-confirm', this)"
+                  aria-label="Hiện/ẩn mật khẩu">👁</button>
+        </div>
+        <div class="field-hint error" id="rf-confirm-hint"></div>
+      </div>
+
+      <button class="btn blue" id="reg-btn" onclick="doRegister()">
+        <span id="reg-btn-text">Đăng ký tài khoản</span>
+      </button>
+
+      <div class="resp-box" id="reg-resp"></div>
+
+      <div class="form-footer">
+        Đã có tài khoản?
+        <a href="#" onclick="switchTab('login');return false">Đăng nhập</a>
+      </div>
+    </div>
+  </div>
+
+  <!-- ══ ĐĂNG NHẬP ══ -->
+  <div class="panel" id="panel-login">
+    <div class="card">
+      <div style="text-align:center">
+        <span class="api-tag">
+          <span class="method-badge">POST</span>/api/auth/login
+        </span>
+      </div>
+      <div class="card-header">
+        <div class="icon-wrap green">🔓</div>
+        <h2>Đăng nhập</h2>
+        <p>Xác thực tài khoản của bạn</p>
+      </div>
+
+      <div class="field" id="lf-user">
+        <label>Tên đăng nhập</label>
+        <input type="text" id="l-username" placeholder="nguyenvana"
+               autocomplete="username" oninput="clearField('lf-user')">
+      </div>
+
+      <div class="field" id="lf-pass">
+        <label>Mật khẩu</label>
+        <div class="pw-wrap">
+          <input type="password" id="l-password" placeholder="Nhập mật khẩu"
+                 autocomplete="current-password" oninput="clearField('lf-pass')">
+          <button class="pw-eye" onclick="toggleEye('l-password', this)"
+                  aria-label="Hiện/ẩn mật khẩu">👁</button>
+        </div>
+      </div>
+
+      <div style="text-align:right; margin-bottom:.75rem">
+        <a href="#" style="font-size:.8rem; color:var(--blue); text-decoration:none">
+          Quên mật khẩu?
+        </a>
+      </div>
+
+      <button class="btn green" id="login-btn" onclick="doLogin()">
+        <span id="login-btn-text">Đăng nhập</span>
+      </button>
+
+      <div class="resp-box" id="login-resp"></div>
+
+      <div class="note">
+        <span class="note-icon">🛡</span>
+        <span>
+          Mật khẩu được so sánh bằng
+          <code>hmac.compare_digest()</code> — bảo vệ khỏi timing attack.
+          Server không bao giờ tiết lộ username có tồn tại hay không.
+        </span>
+      </div>
+
+      <div class="form-footer">
+        Chưa có tài khoản?
+        <a href="#" onclick="switchTab('reg');return false">Đăng ký ngay</a>
+      </div>
+    </div>
+  </div>
+
+  <!-- ══ DANH SÁCH NGƯỜI DÙNG ══ -->
+  <div class="panel" id="panel-users">
+    <div class="table-card">
+      <div class="table-header">
+        <div>
+          <h2>Danh sách người dùng</h2>
+          <p>GET /api/users · SQLite users.db</p>
+        </div>
+        <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap">
+          <div class="search-box">
+            <span class="search-icon">🔍</span>
+            <input type="text" placeholder="Tìm username…"
+                   id="user-search" oninput="filterUsers()">
+          </div>
+          <button class="refresh-btn" onclick="loadUsers()">↻ Tải lại</button>
+        </div>
+      </div>
+
+      <div class="tbl-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>ID</th>
+              <th>Người dùng</th>
+              <th>Password hash</th>
+              <th>Salt</th>
+              <th>Tạo lúc</th>
+            </tr>
+          </thead>
+          <tbody id="user-tbody">
+            <tr class="state-row">
+              <td colspan="5">
+                <span class="loading-dots">Đang tải</span>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="table-footer">
+        <span id="user-count">—</span>
+        <span style="font-family:var(--mono);font-size:.72rem;color:var(--hint)">
+          Hash & Salt hiển thị rút gọn
+        </span>
+      </div>
+    </div>
+  </div>
+
+
+  <script>
+    const API = "http://localhost:5000";
+
+    // ── Kiểm tra server ──────────────────────────────
+    async function pingServer() {
+      try {
+        const r = await fetch(`${API}/api/users`, { signal: AbortSignal.timeout(2000) });
+        if (r.ok) setStatus(true);
+        else setStatus(false);
+      } catch { setStatus(false); }
+    }
+    function setStatus(ok) {
+      document.getElementById('dot').className = 'dot ' + (ok ? 'ok' : 'err');
+      document.getElementById('server-label').textContent =
+        ok ? 'localhost:5000 — online' : 'Server chưa chạy — chạy: python app.py';
+    }
+    pingServer();
+
+    // ── Tab điều hướng ───────────────────────────────
+    function switchTab(tab) {
+      document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+      document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+      document.getElementById('panel-' + tab).classList.add('active');
+      const idx = { reg: 0, login: 1, users: 2 }[tab];
+      document.querySelectorAll('.tab-btn')[idx].classList.add('active');
+      if (tab === 'users') loadUsers();
+    }
+
+    // ── Helpers ──────────────────────────────────────
+    function clearField(id) {
+      const el = document.getElementById(id);
+      if (el) { el.classList.remove('has-error'); }
+      const h = document.getElementById(id + '-hint');
+      if (h) h.textContent = '';
+    }
+    function setError(id, msg) {
+      document.getElementById(id)?.classList.add('has-error');
+      const h = document.getElementById(id + '-hint');
+      if (h) { h.textContent = msg; h.className = 'field-hint error'; }
+    }
+    function toggleEye(inputId, btn) {
+      const el = document.getElementById(inputId);
+      const isHidden = el.type === 'password';
+      el.type = isHidden ? 'text' : 'password';
+      btn.textContent = isHidden ? '🙈' : '👁';
+    }
+    function showResp(boxId, ok, text) {
+      const box = document.getElementById(boxId);
+      box.className = 'resp-box show ' + (ok ? 'ok' : 'err');
+      box.textContent = text;
+    }
+    function setLoading(btnId, textId, loading) {
+      const btn = document.getElementById(btnId);
+      const span = document.getElementById(textId);
+      btn.disabled = loading;
+      if (loading) {
+        btn.innerHTML = '<div class="spinner"></div>';
+      } else {
+        btn.innerHTML = `<span id="${textId}">${span?.dataset.label || span?.textContent}</span>`;
+      }
+    }
+
+    // ── Strength meter ───────────────────────────────
+    function updateStrength() {
+      const pw = document.getElementById('r-password').value;
+      const bars = document.querySelectorAll('#str-track span');
+      bars.forEach(b => b.className = '');
+      let score = 0;
+      if (pw.length >= 8)                              score++;
+      if (/[A-Z]/.test(pw))                           score++;
+      if (/[a-z]/.test(pw))                           score++;
+      if (/\d/.test(pw))                              score++;
+      if (/[!@#$%^&*(),.?":{}|<>]/.test(pw))         score++;
+      const cls = score <= 2 ? 'weak' : score <= 4 ? 'medium' : 'strong';
+      for (let i = 0; i < score; i++) bars[i].className = cls;
+      const lbl = document.getElementById('str-label');
+      lbl.textContent = pw ? (score <= 2 ? 'Yếu' : score <= 4 ? 'Trung bình' : 'Mạnh') : '';
+      lbl.className = 'strength-text ' + cls;
+      clearField('rf-pass');
+    }
+
+    // ── Đăng ký ──────────────────────────────────────
+    async function doRegister() {
+      const username = document.getElementById('r-username').value.trim();
+      const password = document.getElementById('r-password').value;
+      const confirm  = document.getElementById('r-confirm').value;
+      let valid = true;
+
+      if (!username) { setError('rf-user', 'Vui lòng nhập tên đăng nhập'); valid = false; }
+      if (!password) { setError('rf-pass', 'Vui lòng nhập mật khẩu');      valid = false; }
+      if (password !== confirm) {
+        setError('rf-confirm', 'Mật khẩu xác nhận không khớp');
+        valid = false;
+      }
+      if (!valid) return;
+
+      setLoading('reg-btn', 'reg-btn-text', true);
+      try {
+        const res  = await fetch(`${API}/api/auth/register`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ username, password }),
+        });
+        const data = await res.json();
+        if (res.ok) {
+          showResp('reg-resp', true,
+            `${res.status} Created\n{\n  "success": true,\n  "message": "${data.message}",\n  "user_id": ${data.user_id}\n}`);
+          // Reset form
+          ['r-username','r-password','r-confirm'].forEach(id =>
+            document.getElementById(id).value = '');
+          document.querySelectorAll('#str-track span').forEach(b => b.className = '');
+          document.getElementById('str-label').textContent = '';
+        } else {
+          let body = `${res.status} — ${data.message}`;
+          if (data.errors) body += '\n' + data.errors.map(e => `  · ${e}`).join('\n');
+          showResp('reg-resp', false, body);
+        }
+      } catch (e) {
+        showResp('reg-resp', false, 'Không thể kết nối server.\nHãy chạy: python app.py');
+      } finally {
+        const btn = document.getElementById('reg-btn');
+        btn.disabled = false;
+        btn.innerHTML = '<span id="reg-btn-text">Đăng ký tài khoản</span>';
+      }
+    }
+
+    // ── Đăng nhập ────────────────────────────────────
+    async function doLogin() {
+      const username = document.getElementById('l-username').value.trim();
+      const password = document.getElementById('l-password').value;
+      let valid = true;
+
+      if (!username) { setError('lf-user', 'Vui lòng nhập tên đăng nhập'); valid = false; }
+      if (!password) { setError('lf-pass', 'Vui lòng nhập mật khẩu');      valid = false; }
+      if (!valid) return;
+
+      setLoading('login-btn', 'login-btn-text', true);
+      try {
+        const res  = await fetch(`${API}/api/auth/login`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ username, password }),
+        });
+        const data = await res.json();
+        if (res.ok) {
+          showResp('login-resp', true,
+            `200 OK\n{\n  "success": true,\n  "message": "${data.message}",\n  "token": "${data.token}"\n}`);
+        } else {
+          showResp('login-resp', false, `${res.status} — ${data.message}`);
+        }
+      } catch (e) {
+        showResp('login-resp', false, 'Không thể kết nối server.\nHãy chạy: python app.py');
+      } finally {
+        const btn = document.getElementById('login-btn');
+        btn.disabled = false;
+        btn.innerHTML = '<span id="login-btn-text">Đăng nhập</span>';
+      }
+    }
+
+    // ── Danh sách người dùng ─────────────────────────
+    let allUsers = [];
+
+    async function loadUsers() {
+      document.getElementById('user-tbody').innerHTML =
+        '<tr class="state-row"><td colspan="5"><span class="loading-dots">Đang tải</span></td></tr>';
+      document.getElementById('user-count').textContent = '—';
+      try {
+        const res  = await fetch(`${API}/api/users`);
+        const data = await res.json();
+        allUsers = data.users || [];
+        renderUsers(allUsers);
+      } catch {
+        document.getElementById('user-tbody').innerHTML =
+          '<tr class="state-row"><td colspan="5">Không thể kết nối server — chạy: python app.py</td></tr>';
+      }
+    }
+
+    const CHIP_COLORS = [
+      ['#eff6ff','#1d4ed8'], ['#f0fdf4','#15803d'],
+      ['#fff7ed','#c2410c'], ['#fdf4ff','#7e22ce'],
+      ['#ecfdf5','#065f46'],
+    ];
+    function renderUsers(users) {
+      const tbody = document.getElementById('user-tbody');
+      if (!users.length) {
+        tbody.innerHTML =
+          '<tr class="state-row"><td colspan="5">Chưa có người dùng nào</td></tr>';
+        document.getElementById('user-count').textContent = '0 người dùng';
+        return;
+      }
+      tbody.innerHTML = users.map((u, i) => {
+        const [bg, fg] = CHIP_COLORS[i % CHIP_COLORS.length];
+        const initials = u.username.substring(0, 2).toUpperCase();
+        return `<tr>
+          <td style="color:var(--hint);font-family:var(--mono);font-size:.75rem">${u.id}</td>
+          <td>
+            <div class="user-cell">
+              <div class="avatar-chip" style="background:${bg};color:${fg}">${initials}</div>
+              <span style="font-weight:500">${u.username}</span>
+            </div>
+          </td>
+          <td class="mono-cell">${u.password_hash}</td>
+          <td class="mono-cell">${u.salt}</td>
+          <td class="date-cell">${u.created_at || '—'}</td>
+        </tr>`;
+      }).join('');
+      document.getElementById('user-count').textContent =
+        `${users.length} người dùng`;
+    }
+
+    function filterUsers() {
+      const q = document.getElementById('user-search').value.toLowerCase();
+      renderUsers(allUsers.filter(u => u.username.includes(q)));
+    }
+
+    // Tự load khi mở tab users lần đầu
+    document.querySelectorAll('.tab-btn')[2]
+      .addEventListener('click', () => { if (!allUsers.length) loadUsers(); });
+  </script>
+</body>
+</html>
