@@ -347,6 +347,38 @@ def get_user_info(username: str) -> Optional[Dict[str, Any]]:
         return None
 
 
+def list_users(limit: int = 100) -> list[Dict[str, Any]]:
+    """
+    Lấy danh sách người dùng phục vụ quản lý/thử nghiệm.
+
+    Không trả về stored_value, salt, hash hoặc thông tin nhạy cảm.
+    """
+    safe_limit = max(1, min(int(limit), 500))
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute('''
+            SELECT id, username, created_at, updated_at, failed_attempts, last_login, is_active
+            FROM users
+            ORDER BY id DESC
+            LIMIT ?
+        ''', (safe_limit,))
+        return [dict(row) for row in cursor.fetchall()]
+
+
+def get_security_logs(limit: int = 50) -> list[Dict[str, Any]]:
+    """Lấy log bảo mật gần nhất để minh họa quá trình thử nghiệm hệ thống."""
+    safe_limit = max(1, min(int(limit), 200))
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute('''
+            SELECT id, username, event_type, ip_address, details, created_at
+            FROM security_logs
+            ORDER BY id DESC
+            LIMIT ?
+        ''', (safe_limit,))
+        return [dict(row) for row in cursor.fetchall()]
+
+
 # Khởi tạo database khi import module
 if __name__ != "__main__":
     init_database()

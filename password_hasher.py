@@ -1,130 +1,111 @@
 """
 password_hasher.py
 ==================
-Module băm mật khẩu sử dụng SHA-256 kết hợp salt ngẫu nhiên.
+Module xử lý bảo mật mật khẩu cho đề tài:
+"Thiết kế hệ thống xác thực và bảo mật mật khẩu người dùng bằng thuật toán băm SHA-256".
 
-Các hàm chính:
-    - generate_salt()       : Tạo salt ngẫu nhiên an toàn
-    - hash_password()       : Băm mật khẩu kết hợp salt
-    - verify_password()     : Xác thực mật khẩu với hash đã lưu
-    - validate_password()   : Kiểm tra độ mạnh mật khẩu
-    - format_stored_value() : Đóng gói salt + hash để lưu DB
-    - parse_stored_value()  : Giải mã chuỗi đã lưu
+Điểm chính:
+    - Sinh salt ngẫu nhiên bằng os.urandom().
+    - Dùng PBKDF2-HMAC-SHA256: SHA-256 là lõi băm, PBKDF2 lặp nhiều vòng để tăng chi phí brute-force.
+    - Hỗ trợ pepper qua biến môi trường PASSWORD_PEPPER.
+    - So sánh hash bằng hmac.compare_digest() để giảm rủi ro timing attack.
+    - Lưu hash theo định dạng có version để dễ nâng cấp thuật toán về sau.
 """
 from __future__ import annotations
+
 import hashlib
 import hmac
 import os
 import re
-import secrets
 import time
-from flask_limiter import Limiter
 from dataclasses import dataclass
 from typing import Optional, Tuple
-from functools import lru_cache
 
 
-# ─────────────────────────────────────────────
-# Cấu hình hằng số
-# ─────────────────────────────────────────────
+SALT_BYTES = 32
+HASH_ALG = "sha256"
+ITERATIONS = 100_000
+SEPARATOR = "$"
+VERSION = "sha256v2"
 
-SALT_BYTES    = 32          # Độ dài salt: 32 bytes = 256 bit
-HASH_ALG      = "sha256"    # Thuật toán băm
-ITERATIONS    = 100000           # Số vòng lặp PBKDF2 (chống brute-force)
-SEPARATOR     = "$"         # Ký tự phân cách khi lưu: sha256$<salt>$<hash>
-VERSION       = "sha256v2"  # Phiên bản định dạng lưu trữ
+# Trong môi trường production, nên cấu hình PASSWORD_PEPPER ở biến môi trường
+# và không lưu pepper trong database/source code.
+PEPPER = os.environ.get("PASSWORD_PEPPER", "development-pepper-change-in-production")
 
-PEPPER = os.environ.get("PASSWORD_PEPPER", "default_pepper_key_rotate_in_production")
-# Không bao giờ lưu pepper cùng với hash trong database
+MAX_FAILED_ATTEMPTS = 5
+LOCKOUT_DURATION_SECONDS = 900
 
-MAX_FAILED_ATTEMPTS = 5     # Số lần nhập sai tối đa trước khi khóa tài khoản
-LOCKOUT_DURATION_SECONDS = 900  # 15 phút khóa sau 5 lần nhập sai
-# ─────────────────────────────────────────────
-# Kiểu dữ liệu trả về
-# ─────────────────────────────────────────────
 
 @dataclass
 class HashResult:
     """Kết quả sau khi băm mật khẩu."""
-    salt: str           # Salt dạng hex (64 ký tự)
-    hash: str           # Hash dạng hex (64 ký tự)
-    stored_value: str   # Chuỗi lưu vào DB: "sha256v2$<salt>$<hash>"
-    algorithm: str      # Thuật toán sử dụng
-    iterations: int     # Số vòng lặp (nếu dùng PBKDF2)
+
+    salt: str
+    hash: str
+    stored_value: str
+    algorithm: str
+    iterations: int
+
 
 @dataclass
 class ValidationResult:
     """Kết quả kiểm tra độ mạnh mật khẩu."""
+
     is_valid: bool
     errors: list[str]
-    strength: str       # "Yếu" / "Trung bình" / "Mạnh"
-    score: int          # 0–5
+    strength: str
+    score: int
 
 
-# ─────────────────────────────────────────────
-# 1. Tạo salt ngẫu nhiên
-# ─────────────────────────────────────────────
+@dataclass
+class PasswordChangeResult:
+    """Kết quả đổi mật khẩu."""
+
+    success: bool
+    message: str
+    new_stored_value: Optional[str] = None
+
 
 def generate_salt(num_bytes: int = SALT_BYTES) -> str:
-
-    """
-    Tạo salt ngẫu nhiên an toàn về mặt mật mã.
-
-    Sử dụng os.urandom() — nguồn entropy từ hệ điều hành,
-    an toàn hơn random.random() vì không thể đoán trước.
-
-    Args:
-        num_bytes: Số byte entropy (mặc định 32 byte = 256 bit)
-
-    Returns:
-        Chuỗi hex (64 ký tự nếu num_bytes=32)
-
-    Ví dụ:
-        >>> salt = generate_salt()
-        >>> len(salt)
-        64
-    """
-
-    raw_bytes = os.urandom(num_bytes)
-    return raw_bytes.hex()
+    """Tạo salt ngẫu nhiên an toàn bằng nguồn entropy của hệ điều hành."""
+    if num_bytes < 16:
+        raise ValueError("Salt nên có ít nhất 16 bytes để đảm bảo an toàn")
+    return os.urandom(num_bytes).hex()
 
 
-# ─────────────────────────────────────────────
-# 2. Băm mật khẩu
-# ─────────────────────────────────────────────
+def _derive_hash(password: str, salt_hex: str, iterations: int, use_pepper: bool) -> str:
+    """Sinh khóa dẫn xuất bằng PBKDF2-HMAC-SHA256."""
+    if iterations <= 0:
+        raise ValueError("iterations phải lớn hơn 0")
 
-def hash_password(password: str, 
+    try:
+        salt_bytes = bytes.fromhex(salt_hex)
+    except ValueError as exc:
+        raise ValueError("salt phải là chuỗi hex hợp lệ") from exc
+
+    password_material = password + (PEPPER if use_pepper else "")
+    derived_key = hashlib.pbkdf2_hmac(
+        HASH_ALG,
+        password_material.encode("utf-8"),
+        salt_bytes,
+        iterations,
+        dklen=32,
+    )
+    return derived_key.hex()
+
+
+def hash_password(
+    password: str,
     salt: Optional[str] = None,
     iterations: int = ITERATIONS,
-    use_pepper: bool = True) -> HashResult:
+    use_pepper: bool = True,
+) -> HashResult:
     """
-    Băm mật khẩu bằng SHA-256 kết hợp salt.
+    Băm mật khẩu bằng PBKDF2-HMAC-SHA256 kết hợp salt.
 
-    Cách ghép:   SHA-256(salt_hex + password_utf8)
-    Mục đích salt:
-        - Chống rainbow table: mỗi người dùng có hash khác nhau dù
-          cùng mật khẩu, vì salt khác nhau.
-        - Chống dictionary attack: attacker phải tính lại hash
-          cho từng salt riêng biệt.
-
-    Args:
-        password: Mật khẩu dạng chuỗi thuần
-        salt:     Chuỗi hex tạo bởi generate_salt()
-
-    Returns:
-        HashResult chứa salt, hash, stored_value
-
-    Raises:
-        ValueError: Nếu password hoặc salt rỗng
-        TypeError:  Nếu password không phải str
-
-    Ví dụ:
-        >>> salt = generate_salt()
-        >>> result = hash_password("MyPass@2024", salt)
-        >>> len(result.hash)
-        64
+    Về bản chất, SHA-256 là hàm băm lõi bên trong HMAC/PBKDF2; PBKDF2 lặp nhiều vòng
+    để làm chậm brute-force so với SHA-256 thuần một vòng.
     """
-
     if not isinstance(password, str):
         raise TypeError(f"password phải là str, nhận được {type(password).__name__}")
     if not password:
@@ -133,212 +114,113 @@ def hash_password(password: str,
     if salt is None:
         salt = generate_salt()
 
-    # Ghép salt (hex string) + password (utf-8 bytes)
-    if use_pepper:
-        combined = (salt + PEPPER + password).encode("utf-8")
-    else:
-        combined = (salt + password).encode("utf-8")
-
-    derived_key = hashlib.pbkdf2_hmac(
-        HASH_ALG,
-        combined,
-        salt.encode("utf-8"),  # salt làm salt cho PBKDF2
-        iterations,
-        dklen=32  # 32 bytes = 256 bit
-    )
-    digest = derived_key.hex()
-
-    stored = format_stored_value(salt, digest)
-
+    digest = _derive_hash(password, salt, iterations, use_pepper)
+    stored = format_stored_value(salt, digest, iterations=iterations, use_pepper=use_pepper)
 
     return HashResult(
         salt=salt,
         hash=digest,
         stored_value=stored,
-        algorithm=f"pbkdf2-{HASH_ALG}",
+        algorithm=f"pbkdf2-hmac-{HASH_ALG}",
         iterations=iterations,
     )
 
 
-# ─────────────────────────────────────────────
-# 3. Xác thực mật khẩu
-# ─────────────────────────────────────────────
-
 def verify_password(password: str, stored_value: str) -> bool:
-    """
-    Xác thực mật khẩu người dùng nhập so với hash đã lưu.
-
-    Quy trình:
-        1. Giải mã stored_value → lấy salt & hash gốc
-        2. Băm lại mật khẩu vừa nhập với salt đó
-        3. So sánh bằng hmac.compare_digest() (chống timing attack)
-
-    QUAN TRỌNG: Không dùng == để so sánh hash —
-    attacker có thể đo thời gian so sánh từng byte để
-    suy ra hash gốc (timing attack).
-
-    Args:
-        password:     Mật khẩu người dùng vừa nhập
-        stored_value: Chuỗi lưu trong DB ("sha256v1$salt$hash")
-
-    Returns:
-        True nếu mật khẩu đúng, False nếu sai
-
-    Ví dụ:
-        >>> result = hash_password("MyPass@2024", generate_salt())
-        >>> verify_password("MyPass@2024", result.stored_value)
-        True
-        >>> verify_password("WrongPass", result.stored_value)
-        False
-    """
-    # Mật khẩu rỗng hoặc không phải str → luôn sai, không cần hash
-    if not isinstance(password, str) or not password:
+    """Xác thực mật khẩu bằng cách băm lại và so sánh constant-time."""
+    if not isinstance(password, str) or not password or not stored_value:
         return False
 
     try:
-        salt, original_hash = parse_stored_value(stored_value)
-    except ValueError:
-        # stored_value bị hỏng → không match
+        salt, original_hash, iterations, use_pepper = parse_stored_value(stored_value)
+        candidate = _derive_hash(password, salt, iterations, use_pepper)
+    except (TypeError, ValueError):
         return False
 
-    # Băm lại mật khẩu nhập vào
-    if use_pepper:
-        combined = (salt + password + PEPPER).encode("utf-8")
-    else:
-        combined = (salt + password).encode("utf-8")
-    
-    candidate = hashlib.pbkdf2_hmac(
-        HASH_ALG,
-        combined,
-        salt.encode("utf-8"),
-        iterations,
-        dklen=32
-    ).hex()
-
-    # So sánh an toàn (constant-time)
-    return hmac.compare_digest(
-        candidate,
-        original_hash
-
-    )
+    return hmac.compare_digest(candidate, original_hash)
 
 
-# ─────────────────────────────────────────────
-# 4. Định dạng lưu trữ
-# ─────────────────────────────────────────────
-
-def format_stored_value( salt: str, 
-    hash_hex: str, 
+def format_stored_value(
+    salt: str,
+    hash_hex: str,
     iterations: int = ITERATIONS,
-    use_pepper: bool = True) -> str:
+    use_pepper: bool = True,
+) -> str:
     """
-    Đóng gói salt và hash thành chuỗi lưu vào DB.
+    Đóng gói thông tin hash để lưu database.
 
-    Định dạng:  sha256v2$<salt_hex>$<hash_hex>$<iterations>$<use_pepper>
-    Ví dụ:      sha256v2$3f2a...c1$e9b4...7d$100000$True
+    Định dạng hiện tại:
+        sha256v2$<salt_hex>$<iterations>$<pepper_flag>$<hash_hex>
 
-    Lý do lưu chung: Khi đổi thuật toán trong tương lai, có thể
-    đọc phiên bản (sha256v2) và xử lý đúng cách.
-
-    Args:
-        salt:     Chuỗi hex của salt
-        hash_hex: Chuỗi hex của hash
-        iterations: Số vòng lặp PBKDF2
-        use_pepper: Có sử dụng pepper không
-
-    Returns:
-        Chuỗi định dạng "sha256v2$salt$hash$iterations$use_pepper"
+    pepper_flag = 1 nếu khi tạo hash có dùng pepper, ngược lại = 0.
     """
-    return f"{VERSION}{SEPARATOR}{salt}{SEPARATOR}{hash_hex}"
+    if not salt or not hash_hex:
+        raise ValueError("salt và hash_hex không được rỗng")
+    pepper_flag = "1" if use_pepper else "0"
+    return f"{VERSION}{SEPARATOR}{salt}{SEPARATOR}{iterations}{SEPARATOR}{pepper_flag}{SEPARATOR}{hash_hex}"
 
 
 def parse_stored_value(stored_value: str) -> tuple[str, str, int, bool]:
-    """
-    Giải mã chuỗi stored_value → (salt, hash).
+    """Giải mã stored_value thành (salt_hex, hash_hex, iterations, use_pepper)."""
+    if not isinstance(stored_value, str):
+        raise ValueError("stored_value phải là chuỗi")
 
-    Args:
-        stored_value: Chuỗi dạng "sha256v2$salt$hash$iterations$use_pepper"
-
-    Returns:
-        Tuple (salt_hex, hash_hex, iterations, use_pepper)
-
-    Raises:
-        ValueError: Nếu định dạng không hợp lệ
-    """
     parts = stored_value.split(SEPARATOR)
 
+    # Legacy demo format: sha256v1$salt$hash, không pepper, một vòng.
     if len(parts) == 3 and parts[0] == "sha256v1":
-        version, salt, hash_hex = parts
-        return salt, hash_hex, 1, False  # iterations=1, không pepper
-    
-    # Định dạng mới: sha256v2$salt$iterations$pepper_flag$hash
-    if len(parts) == 5 and parts[0] == "sha256v2":
-        version, salt, iterations_str, pepper_flag, hash_hex = parts
-        iterations = int(iterations_str)
-        use_pepper = pepper_flag == "1"
-        return salt, hash_hex, iterations, use_pepper
-    
+        _, salt, hash_hex = parts
+        return salt, hash_hex, 1, False
+
+    # Current format: sha256v2$salt$iterations$pepper_flag$hash
+    if len(parts) == 5 and parts[0] == VERSION:
+        _, salt, iterations_str, pepper_flag, hash_hex = parts
+        try:
+            iterations = int(iterations_str)
+        except ValueError as exc:
+            raise ValueError("iterations không hợp lệ") from exc
+
+        if pepper_flag not in {"0", "1"}:
+            raise ValueError("pepper_flag không hợp lệ")
+
+        return salt, hash_hex, iterations, pepper_flag == "1"
+
     raise ValueError(f"Định dạng stored_value không hợp lệ: '{stored_value}'")
 
 
 def needs_rehash(stored_value: str) -> bool:
-    """
-    Kiểm tra xem hash cũ có cần nâng cấp thuật toán không.
-    
-    Returns:
-        True nếu cần rehash (dùng thuật toán cũ hoặc iterations thấp)
-    """
+    """Kiểm tra hash cũ có cần nâng cấp lên cấu hình hiện tại không."""
     try:
-        salt, hash_hex, iterations, use_pepper = parse_stored_value(stored_value)
-        # Cần rehash nếu iterations < ITERATIONS hoặc dùng SHA-256 thuần
-        return iterations < ITERATIONS
+        _salt, _hash_hex, iterations, use_pepper = parse_stored_value(stored_value)
+        return iterations < ITERATIONS or not use_pepper
     except ValueError:
-        return True  # Định dạng cũ hoặc hỏng → cần rehash
+        return True
 
-
-
-# ─────────────────────────────────────────────
-# 5. Kiểm tra độ mạnh mật khẩu
-# ─────────────────────────────────────────────
 
 def validate_password(password: str) -> ValidationResult:
-    """
-    Kiểm tra độ mạnh và tính hợp lệ của mật khẩu.
-
-    Tiêu chí:
-        ✓ Tối thiểu 8 ký tự
-        ✓ Có chữ hoa (A-Z)
-        ✓ Có chữ thường (a-z)
-        ✓ Có chữ số (0-9)
-        ✓ Có ký tự đặc biệt (!@#$%^&*...)
-
-    Args:
-        password: Mật khẩu cần kiểm tra
-
-    Returns:
-        ValidationResult với is_valid, errors, strength, score
-    """
-    errors = []
+    """Kiểm tra độ mạnh mật khẩu theo các tiêu chí phổ biến."""
+    errors: list[str] = []
     score = 0
 
+    if not isinstance(password, str):
+        return ValidationResult(False, ["Mật khẩu phải là chuỗi"], "Yếu", 0)
+
     checks = [
-        (len(password) >= 8,                         "Tối thiểu 8 ký tự"),
-        (bool(re.search(r"[A-Z]", password)),         "Có ít nhất 1 chữ hoa (A-Z)"),
-        (bool(re.search(r"[a-z]", password)),         "Có ít nhất 1 chữ thường (a-z)"),
-        (bool(re.search(r"\d", password)),             "Có ít nhất 1 chữ số (0-9)"),
-        (bool(re.search(r"[!@#$%^&*(),.?\":{}|<>]", password)),
-                                                      "Có ít nhất 1 ký tự đặc biệt"),
+        (len(password) >= 8, "Tối thiểu 8 ký tự"),
+        (bool(re.search(r"[A-Z]", password)), "Có ít nhất 1 chữ hoa (A-Z)"),
+        (bool(re.search(r"[a-z]", password)), "Có ít nhất 1 chữ thường (a-z)"),
+        (bool(re.search(r"\d", password)), "Có ít nhất 1 chữ số (0-9)"),
+        (bool(re.search(r"[!@#$%^&*(),.?\":{}|<>]", password)), "Có ít nhất 1 ký tự đặc biệt"),
     ]
 
-    for passed, msg in checks:
+    for passed, message in checks:
         if passed:
             score += 1
         else:
-            errors.append(msg)
+            errors.append(message)
 
-    # Kiểm tra độ dài tối da chống DOS
     if len(password) > 128:
-        error.append("Mat khau khong dai qua 128 ky tu!")
+        errors.append("Mật khẩu không được dài quá 128 ký tự")
         score = min(score, 4)
 
     if score <= 2:
@@ -356,124 +238,72 @@ def validate_password(password: str) -> ValidationResult:
     )
 
 
-# ─────────────────────────────────────────────
-# 6. Hàm tiện ích tổng hợp (dùng trong register/login)
-# ─────────────────────────────────────────────
-
 def register_password(password: str) -> HashResult:
-    """
-    Hàm tổng hợp dùng khi đăng ký: validate → salt → hash.
-
-    Args:
-        password: Mật khẩu người dùng nhập khi đăng ký
-
-    Returns:
-        HashResult sẵn sàng lưu vào DB (dùng result.stored_value)
-
-    Raises:
-        ValueError: Nếu mật khẩu không đạt yêu cầu
-    """
+    """Validate mật khẩu, sinh salt và trả về hash sẵn sàng lưu database."""
     validation = validate_password(password)
     if not validation.is_valid:
-        raise ValueError(
-            "Mật khẩu không hợp lệ:\n  - " + "\n  - ".join(validation.errors)
-        )
+        raise ValueError("Mật khẩu không hợp lệ:\n  - " + "\n  - ".join(validation.errors))
+    return hash_password(password)
 
-    salt = generate_salt()
-    return hash_password(password, salt)
 
-def change_password(
-    old_password: str, # mật khẩu cũ
-    new_password: str,
-    current_stored_value: str) -> PasswordChangeResult: 
-    """Đổi mật khẩu an toàn. 
-    Args:
-        old_password: Mật khẩu cũ
-        new_password: Mật khẩu mới
-        current_stored_value: Giá trị hash hiện tại trong DB
-    
-    Returns:
-        PasswordChangeResult với kết quả và stored_value mới nếu thành công 
-    """
-# Xác thực mật khẩu cũ
+def change_password(old_password: str, new_password: str, current_stored_value: str) -> PasswordChangeResult:
+    """Đổi mật khẩu an toàn: xác thực mật khẩu cũ, validate mật khẩu mới, tạo hash mới."""
     if not verify_password(old_password, current_stored_value):
-            return PasswordChangeResult(
-                success=False,
-                message="Mat khau cu khong chinh xac"
-            )
-    
-    # Kiểm tra mật khẩu mới không trùng mật khẩu cũ
-    if old_password == new_password:                                    
-        return PasswordChangeResult(
-            success=False,
-            message="Mat khau moi khong đuoc trung voi mat khau cu"
-        )
-    
-    # Validate mật khẩu mới
+        return PasswordChangeResult(success=False, message="Mật khẩu cũ không chính xác")
+
+    if old_password == new_password:
+        return PasswordChangeResult(success=False, message="Mật khẩu mới không được trùng với mật khẩu cũ")
+
     validation = validate_password(new_password)
     if not validation.is_valid:
         return PasswordChangeResult(
             success=False,
-            message="Mat khau moi khong hop le!: " + ", ".join(validation.errors)
+            message="Mật khẩu mới không hợp lệ: " + ", ".join(validation.errors),
         )
-    
-    # Tạo hash mới
+
     new_hash = hash_password(new_password)
-    
     return PasswordChangeResult(
         success=True,
-        message="Doi mat khau thanh cong",
-        new_stored_value=new_hash.stored_value
+        message="Đổi mật khẩu thành công",
+        new_stored_value=new_hash.stored_value,
     )
 
 
-# ─────────────────────────────────────────────
-# 7. Rate limiting helper (cho login)
-# ─────────────────────────────────────────────
-
 class RateLimiter:
-    """Đơn giản hóa việc rate limiting cho login attempts."""
-    
+    """Rate limiter đơn giản theo username cho demo đăng nhập."""
+
     def __init__(self, max_attempts: int = MAX_FAILED_ATTEMPTS, lockout_seconds: int = LOCKOUT_DURATION_SECONDS):
         self.max_attempts = max_attempts
         self.lockout_seconds = lockout_seconds
-        self._attempts = {}  # username -> (failed_count, lockout_until)
-    
+        self._attempts: dict[str, tuple[int, Optional[float]]] = {}
+
     def is_locked(self, username: str) -> Tuple[bool, Optional[int]]:
-        """Kiểm tra tài khoản có bị khóa không."""
         if username not in self._attempts:
             return False, None
-        
+
         failed_count, lockout_until = self._attempts[username]
-        
         if lockout_until and time.time() < lockout_until:
-            remaining = int(lockout_until - time.time())
-            return True, remaining
-        
-        # Hết thời gian khóa, reset
+            return True, int(lockout_until - time.time())
+
         if lockout_until and time.time() >= lockout_until:
             self._attempts[username] = (0, None)
-        
+
         return False, None
-    
+
     def record_failed(self, username: str) -> Tuple[int, Optional[int]]:
-        """Ghi nhận lần đăng nhập thất bại."""
-        failed_count, lockout_until = self._attempts.get(username, (0, None))
-        
+        failed_count, _lockout_until = self._attempts.get(username, (0, None))
         failed_count += 1
-        
+
         if failed_count >= self.max_attempts:
             lockout_until = time.time() + self.lockout_seconds
             self._attempts[username] = (failed_count, lockout_until)
             return failed_count, int(self.lockout_seconds)
-        
+
         self._attempts[username] = (failed_count, None)
         return failed_count, None
-    
+
     def record_success(self, username: str) -> None:
-        """Reset failed attempts khi đăng nhập thành công."""
         self._attempts[username] = (0, None)
-    
+
     def reset(self, username: str) -> None:
-        """Reset attempts cho username."""
         self._attempts[username] = (0, None)
