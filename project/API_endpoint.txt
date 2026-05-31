@@ -1,0 +1,86 @@
+1. API Endpoint tổng quan 
+POST /api/auth/register : Đăng ký tài khoản mới
+POST /api/auth/login    : Đăng nhập và xác thực
+
+Method(POST); Endpoint(/api/.../...); Chức năng
+
+2.Luồng đăng ký _ POST /api/auth/register
+Yêu cầu (Request body_Json):
+{
+    "username": "nguyenhonga",
+    "password": "pass@234"
+}
+
+Luồng xử lý nội bộ: 
+register(username, password)
+    │
+    ├─ validate_input(username, password)
+    │       → Kiểm tra rỗng, độ dài, ký tự hợp lệ
+    │       → Raise ValidationError nếu sai
+    │
+    ├─ check_username_exists(username)  [query DB]
+    │       → Nếu tồn tại → raise ConflictError("Username đã được sử dụng")
+    │
+    ├─ generate_salt()
+    │       → os.urandom(32) → hex string (64 ký tự)
+    │
+    ├─ hash_password(password, salt)
+    │       → SHA-256(salt + password)  [hoặc PBKDF2/bcrypt]
+    │       → Trả về password_hash (hex string 64 ký tự)
+    │
+    ├─ save_user(username, password_hash, salt)  [INSERT vào DB]
+    │       → Lưu: id, username, password_hash, salt, created_at
+    │
+    └─ return HTTP 201
+            {
+              "success": true,
+              "message": "Đăng ký thành công",
+              "user_id": "<uuid>"
+            }
+
+Các Response :
+Password không đủ dài: 400 (password dài tối thiểu 8 ký tự)
+Username đã tồn tại : 409 (Username đã có)
+Lỗi database : 500 (Lỗi hệ thống vui lòng thử lại)
+Thiếu Request : 400 (username & password là bắt buộc)
+
+
+3.Luồng đăng nhập _ POST /api/auth/login
+Yêu cầu (Request body_Json):
+{
+    "username": "nguyenhonga",
+    "password": "pass@234"
+}
+
+Luồng xử lý nội bộ:
+login(username, password)
+    │
+    ├─ validate_input(username, password)
+    │       → Kiểm tra không rỗng
+    │
+    ├─ find_user_by_username(username)  [query DB]
+    │       → Nếu không tìm thấy → raise AuthError("Sai thông tin đăng nhập")
+    │         ⚠️ KHÔNG nói rõ "username không tồn tại" (tránh user enumeration)
+    │
+    ├─ hash_password(password, user.salt)
+    │       → SHA-256(user.salt + password_nhap_vao)
+    │       → Trả về candidate_hash
+    │
+    ├─ compare_hash(candidate_hash, user.password_hash)
+    │       → So sánh bằng hmac.compare_digest() (chống timing attack)
+    │       → Nếu KHÔNG khớp → raise AuthError("Sai thông tin đăng nhập")
+    │
+    ├─ generate_session_token()  [tùy chọn nâng cao]
+    │       → uuid4() hoặc JWT
+    │
+    └─ return HTTP 200
+            {
+              "success": true,
+              "message": "Đăng nhập thành công",
+              "token": "<session_token>"
+            }
+
+Các Respone :
+Sai thông tin : 401 (Sai thông tin đăng nhập)
+Lỗi database : 500 (Lỗi hệ thống vui lòng thử lại)
+Thiếu Request : 400 (username & password là bắt buộc)
